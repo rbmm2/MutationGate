@@ -1,4 +1,6 @@
 #include "stdafx.h"
+//#define _PRINT_CPP_NAMES_
+#include "asmfunc.h"
 #include "ssn.h"
 
 struct SSN  
@@ -134,21 +136,23 @@ ULONG SyscallNum(_In_ ULONG hash, _In_ SSN* pTable, _In_ ULONG b)
 	} while (a < b);
 
 	__debugbreak();
+
 	return 0;
 }
 
-//#define _PRINT_CPP_NAMES_
-#include "asmfunc.h"
-#include "rtlframe.h"
-
-struct SSN_INFO 
+PVOID SyscallNum(_In_ ULONG hash)
 {
-	PVOID _M_apiAddr;
-	SSN* _M_pTable;
-	ULONG _M_apiSSN;
-	ULONG _M_N;
-	ULONG _M_TargetSSN;
-};
+	CPP_FUNCTION;
+
+	if (SSN_INFO* prf = RTL_FRAME<SSN_INFO>::get())
+	{
+		prf->_M_TargetSSN = SyscallNum(hash, prf->_M_pTable, prf->_M_N);
+		return prf->_M_apiAddr;
+	}
+
+	__debugbreak();
+	return 0;
+}
 
 #define TRACE_FLAG	0x100
 
@@ -179,39 +183,25 @@ LONG NTAPI OnVex(EXCEPTION_POINTERS *ExceptionInfo)
 	return EXCEPTION_CONTINUE_SEARCH;
 }
 
-EXTERN_C_START
-PVOID __imp_NtOpenKey=0, __imp_NtQueryValueKey=0, __imp_NtClose=0;
-EXTERN_C_END
-
-extern volatile const UCHAR guz = 0;
-
-void Stub()ASM_FUNCTION;
-
-void PrepareCall(RTL_FRAME<SSN_INFO>* prf, void** pimp, ULONG hash)
-{
-	*pimp = Stub;
-	prf->_M_TargetSSN = SyscallNum(hash, prf->_M_pTable, prf->_M_N);
-}
-
 #define hash_NtDrawText			0xa5f7373d
-#define hash_NtOpenKey			0x334977c3
-#define hash_NtQueryValueKey	0x5aabc376
-#define hash_NtClose			0x04d4d176
 
-BOOL IsRegSz(PKEY_VALUE_PARTIAL_INFORMATION_ALIGN64 pkvpi)
+BOOL GetNtBase(_Out_ HMODULE* phModule)
 {
-	ULONG DataLength;
-	return pkvpi->Type == REG_SZ && (DataLength = pkvpi->DataLength) && 
-		!(DataLength & (sizeof(WCHAR) - 1)) &&
-		!*(PWSTR)RtlOffsetToPointer(pkvpi->Data, DataLength - sizeof(WCHAR));
+	return GetModuleHandleExW(
+		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, 
+		(PCWSTR)NtCurrentTeb()->ProcessEnvironmentBlock->Ldr, phModule);
 }
 
-void NTAPI ep(PIMAGE_DOS_HEADER hmod)
+void NTAPI ep(HMODULE hmod)
 {
 #ifdef _PREPARE_
 
 	static const PCSTR hh[] = {
-		"DrawText", "OpenKey", "QueryValueKey", "Close", 0
+		"DrawText", 
+		"OpenKey", 
+		"QueryValueKey", 
+		"Close", 
+		0
 	};
 
 	Prepare(hh);
@@ -219,12 +209,8 @@ void NTAPI ep(PIMAGE_DOS_HEADER hmod)
 
 	RTL_FRAME<SSN_INFO> rf;
 
-	if (GetModuleHandleExW(
-		GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, 
-		(PCWSTR)NtCurrentTeb()->ProcessEnvironmentBlock->Ldr, (HMODULE*)&hmod) &&
-		InitSysCall(hmod, &rf._M_pTable, &rf._M_N))
+	if (GetNtBase(&hmod) && InitSysCall((PIMAGE_DOS_HEADER)hmod, &rf._M_pTable, &rf._M_N))
 	{
-
 		ULONG i = 0, N = rf._M_N;
 		SSN* pTable = rf._M_pTable;
 		do 
@@ -245,71 +231,7 @@ void NTAPI ep(PIMAGE_DOS_HEADER hmod)
 
 				if (PVOID h = AddVectoredExceptionHandler(TRUE, OnVex))
 				{
-					NTSTATUS status;
-					UNICODE_STRING ObjectName;
-					OBJECT_ATTRIBUTES oa = { sizeof(oa), 0, &ObjectName, OBJ_CASE_INSENSITIVE };
-					HANDLE hKey;
-
-					RtlInitUnicodeString(&ObjectName, L"\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Control");
-
-					PrepareCall(&rf, &__imp_NtOpenKey, hash_NtOpenKey);
-					
-					if (0 <= (status = NtOpenKey(&hKey, KEY_READ, &oa)))
-					{
-						RtlInitUnicodeString(&ObjectName, L"SystemStartOptions");
-
-						PVOID stack = alloca(guz);
-
-						union {
-							PVOID buf = 0;
-							PKEY_VALUE_PARTIAL_INFORMATION_ALIGN64 pkvpi;
-						};
-
-						PrepareCall(&rf, &__imp_NtQueryValueKey, hash_NtQueryValueKey);
-
-						ULONG cb = 0, rcb = 0x20;
-
-						do 
-						{
-							if (cb < rcb)
-							{
-								cb = RtlPointerToOffset(buf = alloca(rcb - cb), stack);
-							}
-
-							status = NtQueryValueKey(hKey, &ObjectName, KeyValuePartialInformationAlign64, buf, cb, &rcb);
-
-						} while (STATUS_BUFFER_OVERFLOW == status);
-
-						PrepareCall(&rf, &__imp_NtClose, hash_NtClose);
-
-						NtClose(hKey);
-
-						if (0 <= status)
-						{
-							if (IsRegSz(pkvpi))
-							{
-								MessageBoxW(0, (PWSTR)pkvpi->Data, L"SystemStartOptions", MB_ICONINFORMATION);
-							}
-							else
-							{
-								status = STATUS_OBJECT_TYPE_MISMATCH;
-							}
-						}
-					}
-
-					if (0 > status)
-					{
-						PWSTR psz;
-
-						if (FormatMessageW(
-							FORMAT_MESSAGE_FROM_HMODULE|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS,
-							hmod, status, 0, (PWSTR)&psz, 0, 0))
-						{
-							MessageBoxW(0, psz, 0, MB_ICONWARNING);
-							LocalFree(psz);
-						}
-					}
-
+					UserEntry(&rf);
 					RemoveVectoredExceptionHandler(h);
 				}
 
